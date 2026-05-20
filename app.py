@@ -32,6 +32,8 @@ from utils.render import render_chat
 
 from vectorstore.faiss_store import load_index, create_index
 
+from generaldb.getfromgit import getfols
+
 @st.cache_data
 def get_ollama_version():
     try:
@@ -57,10 +59,20 @@ st.set_page_config(
     layout = "wide"
 )
 st.title("ScholiaX")
-st.subheader("AI academin assistant for GTU notes, PYQs and PDF learning")
+
+#get from git
+repo = "https://github.com/imramen07/ScholiaX-assets"
+folds = getfols(repo)
+
+selected_fold = st.sidebar.selectbox(
+    "Select year",
+    options = folds,
+    index = None,
+    placeholder = "Choose subject"
+)
 
 #get files
-st.sidebar.title("Upload Document")
+st.sidebar.title("Or Upload Document")
 uploaded_files = st.sidebar.file_uploader(
     "Choose a PDF",
     type = "pdf",
@@ -75,61 +87,95 @@ if "messages" not in st.session_state:
 
 render_chat()
 
-if uploaded_files:
-    file_data = [(f.name, f.read()) for f in uploaded_files]
+#loader
+@st.cache_resource
+def load_embeddings_cached(device):
+    return load_embeddings(device)
 
-    file_hashes = hash_files(file_data)
-    combined_hash = hashlib.sha256(
-        "".join(sorted(file_hashes.values())).encode()
-        ).hexdigest()
+embeddings = load_embeddings_cached(config.device)
 
-    index_dir = f"faiss_index_{combined_hash}"
+if selected_fold:
 
-    file_changed = (
+    index_dir = f"path/{selected_fold}"
+
+    if (
         "processed_file" not in st.session_state or
-        st.session_state.processed_file != combined_hash
-    )
+        st.session_state.processed_file != selected_fold
+    ):
 
-    #loader
-    @st.cache_resource
-    def load_embeddings_cached(device):
-        return load_embeddings(device)
-    
-    embeddings = load_embeddings_cached(config.device)
+        st.session_state.db = load_index(
+            embeddings,
+            index_dir
+        )
 
-    if file_changed:
-        with st.spinner("Indexing Document..."):
-            try:
-                all_pages = []
+        st.session_state.db = ensure_gpu(
+            st.session_state.db
+        )
 
-                for name, data in file_data:
-                    all_pages.extend(load_pdf(name, data))
+        st.session_state.bm25 = BM25Store.load(
+            f"path/{selected_fold}/bm25.pkl"
+        )
 
-            except Exception as e:
-                st.error(f"Error loading pdf: {e}")
-                st.stop()
+        st.session_state.processed_file = selected_fold
+        st.session_state.messages = []
 
-            chunks = split_docs(all_pages)
+        st.sidebar.success(
+            f"Loaded {selected_fold}"
+        )
 
-            st.sidebar.write(f"Total pages: {len(all_pages)}")
-            st.sidebar.write(f"Chunks: {len(chunks)}")
+if uploaded_files or "db" in st.session_state:
 
-            db = create_index(chunks, embeddings, index_dir)
+    if uploaded_files:
 
-            st.session_state.db = db
-            st.session_state.processed_file = combined_hash
-            st.session_state.messages = []
+        file_data = [(f.name, f.read()) for f in uploaded_files]
 
-            bm25_store = BM25Store(chunks)
-            st.session_state.bm25 = bm25_store
+        file_hashes = hash_files(file_data)
+        combined_hash = hashlib.sha256(
+            "".join(sorted(file_hashes.values())).encode()
+            ).hexdigest()
 
-            st.session_state.db = ensure_gpu(st.session_state.db)
+        index_dir = f"faiss_index_{combined_hash}"
 
-    else:
-        if "db" not in st.session_state:
-            st.session_state.db = load_index(embeddings, index_dir)
-            
-            st.session_state.db = ensure_gpu(st.session_state.db)
+        file_changed = (
+            "processed_file" not in st.session_state or
+            st.session_state.processed_file != combined_hash
+        )
+
+        if file_changed:
+            with st.spinner("Indexing Document..."):
+                try:
+                    all_pages = []
+
+                    for name, data in file_data:
+                        all_pages.extend(load_pdf(name, data))
+
+                except Exception as e:
+                    st.error(f"Error loading pdf: {e}")
+                    st.stop()
+
+                chunks = split_docs(all_pages)
+
+                st.sidebar.write(f"Total pages: {len(all_pages)}")
+                st.sidebar.write(f"Chunks: {len(chunks)}")
+
+                db = create_index(chunks, embeddings, index_dir)
+
+                st.session_state.db = db
+                st.session_state.processed_file = combined_hash
+                st.session_state.messages = []
+
+                bm25_path = f"{index_dir}/bm25.pkl"
+                bm25_store = BM25Store(chunks)
+                bm25_store.save(bm25_path)
+                st.session_state.bm25 = BM25Store.load(bm25_path)
+
+                st.session_state.db = ensure_gpu(st.session_state.db)
+
+        else:
+            if "db" not in st.session_state:
+                st.session_state.db = load_index(embeddings, index_dir)
+
+                st.session_state.db = ensure_gpu(st.session_state.db)
 
     st.sidebar.success("Document Ready");
     st.sidebar.markdown("Built with 💗 by Ramen")
@@ -274,4 +320,4 @@ if uploaded_files:
             st.write(f"{src}: Pages {', '.join(map(str, pages))}")
 
 else:
-    st.info("Upload a PDF to start chat")
+    st.info("Select or Upload a PDF to start chat")
