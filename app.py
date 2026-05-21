@@ -92,6 +92,13 @@ uploaded_files = st.sidebar.file_uploader(
 
 st.sidebar.write(f"Device: {config.device}")
 
+#for testing ONLY (llm off)
+testmode = st.sidebar.toggle(
+    "Test mode",
+    value = False,
+    help = "No LLM required"
+)
+
 #chat state
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -112,12 +119,22 @@ def load_reranker_cached(device):
     return load_reranker(device)
 
 embeddings = load_embeddings_cached(config.device)
-llm = load_llm_cached()
-reranker = load_reranker_cached(config.device)
+llm = None
+reranker = None
+
+if not testmode:
+    llm = load_llm_cached()
+    reranker = load_reranker_cached(config.device)
 
 if uploaded_files:
 
     db, bm25, sid = loadsource(uploaded_files, embeddings)
+
+    if testmode:
+        st.success("Index created")
+        st.write(f"Source: {sid}")
+        st.stop()
+
     file_changed = st.session_state.get("processed_file") != sid
     
     if file_changed or "db" not in st.session_state:
