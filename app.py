@@ -1,7 +1,6 @@
 import sys
 import subprocess
 import streamlit as st
-import hashlib
 
 from collections import defaultdict
 
@@ -11,9 +10,6 @@ from core.embeddings import load_embeddings
 from core.llm import load_llm
 from core.reranker import load_reranker
 
-from ingestion.loader import load_pdf
-from ingestion.splitter import split_docs
-
 from pipeline.context_builder import build_chat_context
 from pipeline.intent import detect_intent
 from pipeline.prompt_builder import build_prompt
@@ -21,18 +17,14 @@ from pipeline.query_rewriter import rewrite_query
 
 from retrieval.rerank import rerank_docs
 from retrieval.retriever import retrieve_docs
-from retrieval.bm25_store import BM25Store
 
-import utils.cuda as cuda
 from utils.deduplication import deduplicate_docs
 from utils.extract_relevance import extract_relevant_sentences
-from utils.hashing import hash_files
-from utils.ensure_gpu import ensure_gpu
 from utils.render import render_chat
 
-from vectorstore.faiss_store import load_index, create_index
-
 from generaldb.getfromgit import getfols
+
+from manager import loadsource
 
 @st.cache_data
 def get_ollama_version():
@@ -62,14 +54,33 @@ st.title("ScholiaX")
 
 #get from git
 repo = "https://github.com/imramen07/ScholiaX-assets"
-folds = getfols(repo)
 
-selected_fold = st.sidebar.selectbox(
-    "Select year",
-    options = folds,
+year = getfols(repo)
+
+selected_year = st.sidebar.selectbox(
+    "Select Year",
+    options = year,
     index = None,
-    placeholder = "Choose subject"
+    placeholder = "Choose Year"
 )
+
+selected_subj = None
+
+if selected_year:
+    subj = getfols(
+        repo,
+        selected_year
+    )
+    selected_subj = st.sidebar.selectbox(
+        "Select Subject",
+        options = subj,
+        index = None,
+        placeholder = "Choose Subject"
+    )
+
+if selected_year and selected_subj:
+    path = f"{selected_year}/{selected_subj}"
+
 
 #get files
 st.sidebar.title("Or Upload Document")
@@ -87,97 +98,37 @@ if "messages" not in st.session_state:
 
 render_chat()
 
-#loader
+#loaders
 @st.cache_resource
 def load_embeddings_cached(device):
     return load_embeddings(device)
 
+@st.cache_resource
+def load_llm_cached():
+    return load_llm()
+
+@st.cache_resource
+def load_reranker_cached(device):
+    return load_reranker(device)
+
 embeddings = load_embeddings_cached(config.device)
+llm = load_llm_cached()
+reranker = load_reranker_cached(config.device)
 
-if selected_fold:
+if uploaded_files:
 
-    index_dir = f"path/{selected_fold}"
-
-    if (
-        "processed_file" not in st.session_state or
-        st.session_state.processed_file != selected_fold
-    ):
-
-        st.session_state.db = load_index(
-            embeddings,
-            index_dir
-        )
-
-        st.session_state.db = ensure_gpu(
-            st.session_state.db
-        )
-
-        st.session_state.bm25 = BM25Store.load(
-            f"path/{selected_fold}/bm25.pkl"
-        )
-
-        st.session_state.processed_file = selected_fold
-        st.session_state.messages = []
-
-        st.sidebar.success(
-            f"Loaded {selected_fold}"
-        )
-
-if uploaded_files or "db" in st.session_state:
-
-    if uploaded_files:
-
-        file_data = [(f.name, f.read()) for f in uploaded_files]
-
-        file_hashes = hash_files(file_data)
-        combined_hash = hashlib.sha256(
-            "".join(sorted(file_hashes.values())).encode()
-            ).hexdigest()
-
-        index_dir = f"faiss_index_{combined_hash}"
-
-        file_changed = (
-            "processed_file" not in st.session_state or
-            st.session_state.processed_file != combined_hash
-        )
-
+    db, bm25, sid = loadsource(uploaded_files, embeddings)
+    file_changed = st.session_state.get("processed_file") != sid
+    
+    if file_changed or "db" not in st.session_state:
+        st.session_state.db = db
+        st.session_state.bm25 = bm25
+        st.session_state.processed_file = sid
+        
         if file_changed:
-            with st.spinner("Indexing Document..."):
-                try:
-                    all_pages = []
+            st.session_state.messages = []
 
-                    for name, data in file_data:
-                        all_pages.extend(load_pdf(name, data))
-
-                except Exception as e:
-                    st.error(f"Error loading pdf: {e}")
-                    st.stop()
-
-                chunks = split_docs(all_pages)
-
-                st.sidebar.write(f"Total pages: {len(all_pages)}")
-                st.sidebar.write(f"Chunks: {len(chunks)}")
-
-                db = create_index(chunks, embeddings, index_dir)
-
-                st.session_state.db = db
-                st.session_state.processed_file = combined_hash
-                st.session_state.messages = []
-
-                bm25_path = f"{index_dir}/bm25.pkl"
-                bm25_store = BM25Store(chunks)
-                bm25_store.save(bm25_path)
-                st.session_state.bm25 = BM25Store.load(bm25_path)
-
-                st.session_state.db = ensure_gpu(st.session_state.db)
-
-        else:
-            if "db" not in st.session_state:
-                st.session_state.db = load_index(embeddings, index_dir)
-
-                st.session_state.db = ensure_gpu(st.session_state.db)
-
-    st.sidebar.success("Document Ready");
+    st.sidebar.success("Document Ready")
     st.sidebar.markdown("Built with 💗 by Ramen")
 
     st.sidebar.markdown("---")
@@ -186,17 +137,6 @@ if uploaded_files or "db" in st.session_state:
         f"Streamlit {streamlit_version} | "
         f"{get_ollama_version()}"
     )
-
-    #loaders
-    @st.cache_resource
-    def load_llm_cached():
-        return load_llm()
-    llm = load_llm_cached()
-
-    @st.cache_resource
-    def load_reranker_cached(device):
-        return load_reranker(device)
-    reranker = load_reranker_cached(config.device)
 
     #input
     query = st.chat_input("Ask ScholiaX")
@@ -320,4 +260,4 @@ if uploaded_files or "db" in st.session_state:
             st.write(f"{src}: Pages {', '.join(map(str, pages))}")
 
 else:
-    st.info("Select or Upload a PDF to start chat")
+    st.info("Upload a PDF to start chat")
